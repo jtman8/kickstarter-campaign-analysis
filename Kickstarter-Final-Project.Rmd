@@ -1,0 +1,473 @@
+---
+title: 'Final Project: Predicting Kickstarter Campaign Success'
+author: "T. Manderfield"
+date: "12/13/2019"
+output:
+  html_document: default
+  pdf_document: default
+---
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+## Background
+In recent years, Kickstarter has been one of the leaders in online crowdfunding platforms. Unlike its competitors, Kickstarter utilizes and "all-or-nothing" style crowdfunding effort, meaning that backers only have to pay their pledge if the project reaches its fundraising goal. According to Kickstarter, there have been a total of 17,232,552
+backers for projects, with a total pledge amount of $4,698,908,879. Further, over 34% of projects are a success on this platform. This is a huge amount of money involved here and a relatively high likelihood of success. Many companies have started as a kickstarter campaign and have then become large legitimate companies. The Pebble Smart Watch started on Kickstarter and was bought out by FitBit in 2017. Oculus Rift, one of the most popular virtual reality headset was started on Kickstarter as well and was bought by Facebook for over \$2,000,000,000. Thus, it is important to understand what makes projects successful, so that others can hopefully find better success for their ideas as well. Initially, I found data on Kaggle, which I explored and began cleaning. However, after further research, I found a better dataset on data.world (https://data.world/rdowns26/kickstarter-campaigns/workspace/file?filename=kickstarter_data_full.csv). This new dataset provided additional information into some key characteristics, such as the Staff Pick indicator variable, details surrounding when projects were initially created, before being launched, as well as multiple links for each project to find out more about the project's creator, story, and rewards. Both of these dataset left me wanting to know more about the actual projects themselves. In this project I intend to look at kickstarter from the perspective of a potential creator and both datasets had a lot of information about the projects, but most of the variables had to do with things that a creator would not know in advance or have control how to change. Consequently, I took these urls and attempted to extract information about the actual projects themselves. 
+
+## Data Preparation
+Before reading this final dataset into R, I used Python to scrape the associated webpages to gather more information. As mentioned in the background, I was interested at getting at the heart of the factors that a creator could change in order to improve their kickstarter campaign. The features of both the Kaggle Dataset that I originally worked with, as well as the improved dataset that I found on Data.World, did not seem to have all of the information that I was looking forward to using. The major blindspots that the datasets were missing were:  
+1) The rewards  
+2) The actual project description text
+
+Both of these interested me, as I looked to apply some text analytics and sentiment analysis, in order to not only generate new features, but to better understand what makes a kickstarter campaign persuasive and, consequently, successful. In Python, I was able to more quickly apply the Valence Aware Dictionary and sEntiment Reasoner (VADER) sentiment analyzer to obtain a polarity score for the text. I used VADER, as well as more basic python to generate the following features:
+* name_sentiment (sentiment of the name of the project)
+* blurb_sentiment (sentiment of the blurb of the project. The blurb is the short description that can be seen when browsing)
+* reward_sent_change (sentiment change between the description of the lowest and the description of the highest reward)
+* reward_word_change (the number of words of the best reward - the number of words to describe the first/worst reward)
+* min_reward_USD (the cost of the minimum reward associated with a project)
+
+Unfortunately, I only able to pull in approximately 50% of the project description data. Part of the reason for this was that information had been pulled down from the site after the campaign ended, leaving only the project name, blurb and the reward information. That being said, we will proceed with the addition of the rewards. Having the rewards should provide crucial information, since it would seem that these rewards could provide a strong incentive to contribute to the project.
+
+
+### PART 1: Reading data, data typing and replacement of odd values with NAs
+```{r}
+## First I read in my data.
+data <- read.csv("/Users/tylermanderfield/Desktop/kickstarter_updated_with_scraping.csv")
+```
+
+
+Package Imports
+```{r warning=FALSE, message=FALSE}
+library(tidyverse)    # for data cleaning/munging/manipulation
+library(lubridate)    # for datetime manipulation specifically
+library(ggplot2)      # for plotting
+library(ggthemes)     # for improving aesthetics for plotting
+library(Amelia)       # for evaluation of missingness
+library(rpart)        # for decision-tree-based models
+library(caret)        # for helping with train/test sets, etc.
+library(class)        # for knn
+library(randomForest) # for randomForest model
+library(ada)          # for adaboost
+library(adabag)       # for adaboost
+```
+
+Before beginning cleaning, the prediction to be made is whether or not a kickstarter campaign is a success or failure. This means that these are the only levels of the variable "state" to be considered. For the purposes of this analysis
+```{r}
+data2 <- data %>% filter(state %in% c("successful","failed"))
+```
+
+Since the prediction will be whether or not a project succeeded, it needs to be considered as a factor. The variable of interest is called "state," which represents the state (success/failure/active/suspended) of the project when the data was collected. It appears that this is represented with an integer though, even though it is considered a factor. The same is true for the variable category. These problems are fixed below.
+```{r}
+# typeof(data2$state) # is of integer type
+data2$state <- as.factor(as.character(data2$state)) ## convert to character first, then factor
+data2$category <- as.character(data2$category)      ## make sure category is treated as a character, not integer
+```
+
+Conversions
+```{r}
+## Convert indicator variables to factors
+data2$LaunchedTuesday <- as.factor(data2$LaunchedTuesday)
+data2$DeadlineWeekend <- as.factor(data2$DeadlineWeekend)
+
+## The remaining variables appear to be in their proper format.
+```
+
+Next, I took a look at values that might seem unreasonable. I plotted the distributions of the numeric variables and also examined the levels of factor variables to check to see if anything stood out. While some values did appear to be high, such as the maximum value of USD_Pledged, each time I checked them with the Kickstarter website, they appeared to be legitimate.
+
+```{r}
+## Distribution of Campaigns by Category
+ggplot(data = data2) + geom_bar(aes(x = category)) + theme_economist() + labs(title = "Distribution of Campaigns among Categories", x = "Category", y = "Frequency of Campaigns in this Category") + theme(axis.text.x = element_text(size = 10, face="bold", vjust = 1, hjust = 1, angle = 45), plot.title = element_text(hjust = 0.5))
+
+## There appears to be a bar in the barplot associated with an empty string. 
+# sum(data2$category == "") # = 1699
+## Let's convert these empty strings to NA
+data2$category <- ifelse(data2$category == "", NA, data2$category)
+
+
+## Dist of Campaigns by Country 
+ggplot(data = data2) + geom_bar(aes(x = country )) + theme_economist() + labs(title = "Distribution of Campaigns among Countries", x = "Country", y = "Frequency of Campaigns in this Country") + theme(axis.text.x = element_text(size = 10, face="bold", vjust = 1, hjust = 1, angle = 45), plot.title = element_text(hjust = 0.5))
+
+## Dist of Campaigns by Outcome
+ggplot(data = data2) + geom_bar(aes(x = state ), width = 0.5) + theme_economist() + labs(title = "Distribution of Campaigns among Outcomes", x = "Outcome of Campaign", y = "Frequency of Campaigns with this State") + theme(axis.text.x = element_text(size = 10, face="bold", vjust = 1, hjust = 1, angle = 45), plot.title = element_text(hjust = 0.5))
+
+table(data2$state)/length(data2$state)
+## It is good that this distribution of successes and failures is on par with Kickstarter more broadly. According to Kickstarter's website(https://www.kickstarter.com/help/stats), the success rate on kickstarter is 37.46% as of Thursday, December 12, 2019. Our data presents a success rate of 35%. 
+
+## Dist of Amount Pledged in USD
+ggplot(data = data2) + geom_boxplot(aes(x = "", y = usd_pledged ), width = 0.2) + theme_economist() + labs(title = "Distribution of Pledged Amounts in USD", x = "Amount Pledged (in USD)", y = "Frequency of Campaigns with Amount Pledged") + theme(axis.text.x = element_text(size = 10, face="bold", vjust = 1, hjust = 1, angle = 45), plot.title = element_text(hjust = 0.5))
+
+ggplot(data = data2) + geom_boxplot(aes(x = state, y = goal ), width = 0.2) + theme_economist() + labs(title = "Distribution of Pledged Amounts in USD", x = "Amount Pledged (in USD)", y = "Frequency of Campaigns with Amount Pledged") + theme(axis.text.x = element_text(size = 10, face="bold", vjust = 1, hjust = 1, angle = 45), plot.title = element_text(hjust = 0.5))
+
+ggplot(data = data2) + geom_dotplot(aes(x = usd_pledged ), binwidth= 10000, dotsize = 4) + labs(title = "Distribution of Pledged Amounts in USD", x = "Amount Pledged (in USD)", y = "Frequency of Campaigns with Amount Pledged") + theme(axis.text.x = element_text(size = 10, face="bold", vjust = 1, hjust = 1, angle = 45), plot.title = element_text(hjust = 0.5))
+
+ggplot(data = data2) + geom_density(aes(x = usd_pledged )) + theme_economist() + labs(title = "Distribution of Pledged Amounts in USD", x = "Amount Pledged (in USD)", y = "Frequency of Campaigns with Amount Pledged") + theme(axis.text.x = element_text(size = 10, face="bold", vjust = 1, hjust = 1, angle = 45), plot.title = element_text(hjust = 0.5))
+
+## Dist of Projects among Currencies
+ggplot(data = data2) + geom_bar(aes(x = currency)) + theme_economist() + labs(title = "Distribution of Campaigns Among Currencies", x = "Currency Type", y = "Frequency of Campaigns using this Currency") + theme(axis.text.x = element_text(size = 10, face="bold", vjust = 1, hjust = 1, angle = 45), plot.title = element_text(hjust = 0.5))
+
+## Dist of Name sentiment
+ggplot(data = data2) + geom_histogram(aes(x = name_sentiment)) + theme_economist() + labs(title = "Distribution of Name Sentiment", x = "", y = "Frequency of Projects with this Name Sentiment") + theme(axis.text.x = element_text(size = 10, face="bold", vjust = 1, hjust = 1, angle = 45), plot.title = element_text(hjust = 0.5))
+
+## Dist of blurb sentiment
+ggplot(data = data2) + geom_bar(aes(x = currency)) + theme_economist() + labs(title = "Distribution of Campaigns Among Currencies", x = "Currency Type", y = "Frequency of Campaigns using this Currency") + theme(axis.text.x = element_text(size = 10, face="bold", vjust = 1, hjust = 1, angle = 45), plot.title = element_text(hjust = 0.5))
+
+# data2[data2$usd_pledged == max(data2$usd_pledged),]
+## High values are in fact legitimate after further research
+
+## Dist of the Minimum Reward Value for Campaigns
+ggplot(data = data2) + geom_histogram(aes(x = min_reward_USD), binwidth = 5) + theme_economist() + labs(title = "Distribution of Cost of the Minimum Reward", x = "Cost of the Minimum Reward", y = "Frequency of Campaigns with this Minimum Reward Cost") + theme(axis.text.x = element_text(size = 10, face="bold", vjust = 1, hjust = 1, angle = 45), plot.title = element_text(hjust = 0.5))
+
+
+# taking a subset of the data so it will be easier to visually see
+sub_1000 <-data2[data2$min_reward_USD <= 1000,]
+## Dist of the Minimum Reward Value among Currencies
+ggplot(data = sub_1000) + geom_histogram(aes(x = min_reward_USD), binwidth = 5) + theme_economist() + labs(title = "Distribution of Cost of the Minimum Reward ($1000 and less)", x = "Cost of the Minimum Reward", y = "Frequency of Campaigns with this Minimum Reward Cost") + theme(axis.text.x = element_text(size = 10, face="bold", vjust = 1, hjust = 1, angle = 45), plot.title = element_text(hjust = 0.5))
+
+## It appears that these all were offering donations of $10,000 dollars for more than one reward (i.e. the reward price remained constant for all potential rewards). As such, these will be flagged with an indicator variable and a new feature that indicates whether a campaign has increasing costs of rewards will be considered.
+
+## creation of flag variable for these values:
+data2$tenthousandsonly <- ifelse(data2$min_reward_USD == 10000, 1, 0)
+
+
+## Let's convert goal to be in USD, since pledged already has this (usd_pledged).
+data2$usd_goal <- data2$goal * data2$static_usd_rate
+
+max(data2[data2$state == "successful","goal"])
+
+data2[data2$state == "successful" & data2$goal == 1250000,]
+
+data2$lofty_goal <- as.factor(ifelse(data2$usd_goal > 1250000 *1.5, T, F))
+
+```
+
+Check our categorical variables to ensure the rest do not have zeros in them.
+```{r}
+## Over half of proj_text and derived features are missing actual data...will likely not use these as predictors
+sum(data2$proj_text == "") / nrow(data2)
+sum(data2$risks_text == "")/ nrow(data2)
+sum(data2$story_text == "")/ nrow(data2)
+
+```
+
+## PART 2: EDA, Cleaning and Imputation
+
+### Examining Missingness
+```{r}
+missmap(data2)
+```
+
+
+#### Examining Missingness in Rewards-Based Variables
+There appears to be some systematic missingness. Let's take a closer look at the observations that appear to have missing values in 4 of our variables. What we find is that the four variables, "reward_sent_change", "reward_word_change", "num_rewards" and "min_reward_USD," all relied on the rewards variable to be populated. In the case of these missing observations, the text of the rewards was missing, which meant that these were producing NA values. Since there are only 34 of these observations, it makes more sense to remove the observation than it does to remove the variable. Due to the sporadic nature of these projects, imputation also seems like it would not likely be accurate enough to properly represent these features. Below, these observations are removed.
+
+```{r}
+## The NA values involving the following variables all stem from the fact that they rely on the rewards to populate them. If the rewards were missing for an observation, then these values would be NA. Thus, we will remove these observations for the sake of seeing if these variables would help make a better model.
+data2 <- data2[!(is.na(data2$reward_sent_change) & is.na(data2$reward_word_change) & is.na(data2$num_rewards) & is.na(data2$min_reward_USD)),]
+
+## Upon further examination, it appears that these are missing the text from the rewards because they are in bullet points rather than prose. Perhaps it either took too long for the page to grab this type of text off the page before proceeding to the next page or that as a result, since there are so few of them. 
+sum(is.na(data2$reward_sent_change)) 
+data2 <- data2[!is.na(data2$reward_sent_change),]
+```
+
+#### Examining Missingness in Category
+The remaining missingness is explained by category. As we noted earlier, category appeared to be an empty string ("") for many of the observations. It is unclear why this is the case from the dataset, however, it doesn't appear that they were necessarily correlated with any other features of the set. Imputation does not seem to be an optimal option in this scenario, since the other variables about a kickstarter campaign wouldn't necessarily predict the category well, especially with 20 or so categories. That being said, category is a variable that could be quite important to the set. Thus, I am replacing the lack of a category with the word "Unknown". In this way, the level will be behave similarly to a flag variable and thus not remove approximately 9% of our total observations.
+```{r}
+# sum(is.na(data2))              # = 27
+# sum(is.na(data2$category))     # = 27
+
+## Replace "" with "Unknown"
+data2$category <- ifelse(is.na(data2$category), "Unknown", data2$category)
+```
+
+### Exploratory Data Analysis
+Next, we will look at how some of the potential predictor variables relate to the response in order to determine whether they truly help determine whether a campaign succeeded or failed. 
+```{r}
+ggplot(data = data2) + geom_boxplot(aes(x = state, y = usd_goal )) + theme_economist() + labs(title = "Distribution of Campaign Goals (in USD) between the Campaign Outcomes", x = "Kickstarter Campaign Outcome", y = "Target Amount for Campaign (USD)") + theme(axis.text.x = element_text(size = 10, face="bold", vjust = 1, hjust = 1, angle = 45), plot.title = element_text(hjust = 0.5))
+
+
+
+# ggplot(data = data2) + geom_point(aes(x = usd_goal, y = usd_pledged, color = state)) + theme_economist() + labs(title = "Distribution of the Amount Pledged (in USD) between the Campaign Outcomes", x = "Goal", y = "Amount Pledged (USD)") + theme(axis.text.x = element_text(size = 10, face="bold", vjust = 1, hjust = 1, angle = 45), plot.title = element_text(hjust = 0.5))
+
+## Staff pick seems like a good discriminator
+table(data2$staff_pick, data2$state)
+ggplot(data = data2) + geom_bar(aes(x=staff_pick, fill=state),position="dodge") + theme_economist() + labs(title = "Distribution of Campaigns among Categories", x = "Goal", y = "Pledged (USD)") + theme(axis.text.x = element_text(size = 10, face="bold", vjust = 1, hjust = 1, angle = 45), plot.title = element_text(hjust = 0.5))
+
+
+ggplot(data = data2) + geom_boxplot(aes(x=state, y=num_rewards)) + theme_economist() + labs(title = "Distribution of the Number of Rewards by Outcome", y = "Number of Rewards", x = "Kickstarter Campaign Outcome") + theme(axis.text.x = element_text(size = 10, face="bold", vjust = 1, hjust = 1, angle = 45), plot.title = element_text(hjust = 0.5))
+
+## Changes in reward sentiment, which I calculated to be the sentiment of the last (usually highest) reward minus the sentiment of the first (often lowest) reward, appeared to not really help in discriminating. The same was true for the sentiment associated with the blurb about the project that you can see as you scroll through kickstarter. 
+ggplot(data= data2) + geom_boxplot(aes(x = state, y = reward_sent_change)) + theme_economist() + labs(title = "Sentiment Change in Reward Descriptions by Campaign Outcome", x = "Campaign Outcome", y = "Change in Sentiment of Reward Descriptions\n(Best - Worst Reward)") + theme(axis.text.x = element_text(size = 10, face="bold", vjust = 1, hjust = 1, angle = 45), plot.title = element_text(hjust = 0.5))
+ggplot(data= data2) + geom_boxplot(aes(x = state, y = blurb_sentiment))+ theme_economist() + labs(title = "Distribution of Blurb Sentiment by Campaign Outcome", x = "Goal", y = "Pledged (USD)") + theme(axis.text.x = element_text(size = 10, face="bold", vjust = 1, hjust = 1, angle = 45), plot.title = element_text(hjust = 0.5))
+
+## The sentiment associated with the actual name of the campaign, however, does seem to differ slightly between the two groups. It looks like the projects that succeeded had a higher proportion of more positively-associated names, compared to the projects and campaigns that failed.
+ggplot(data= data2) + geom_boxplot(aes(x = state, y = name_sentiment))+ theme_economist() + labs(title = "Sentiments of Project Names by Campaign Outcome", x = "Campaign Outcome", y = "Sentiment of Project Name") + theme(axis.text.x = element_text(size = 10, face="bold", vjust = 1, hjust = 1, angle = 45), plot.title = element_text(hjust = 0.5))
+
+
+# Min_reward_USD represents the smallest amount a backer can pay in order to get a reward (the lowest cost of a reward for a specific project). This did not on its face appear to be a great discriminator, however, there seems to be a great opportunity for an indicator variable, because successful projects did not have a minimum buy-in above $2500.
+ggplot(data=data2) + geom_boxplot(aes(x = state, y = min_reward_USD)) + theme_economist() + labs(title = "Minimum Reward Cost of Kickstart Campaigns by Outcome", x = "Outcome of Kickstarter Campaign", y = "Cost of Lowest Reward")
+
+```
+
+
+```{r}
+
+## Removing variables that may have contributed towards actual predictors but are not predictors themselves as well as predictors that do not seem promising.
+data3 <- data2 %>% select(
+  -currency_symbol,          # irrelevant to project performance
+  -currency_trailing_code,   # irrelevant to project performance
+  -SuccessfulBool,           # duplicates idea of "state" variable
+  -rewards,                  # rewards themselves are each going to be unique, so not a useful predictor
+  -CAorAUorNZ,               # repetitive with country
+  -USorGB,                   # repetitive with country
+  -story_text,               # We noted earlier that this was unfortunately an empty string for ~50% of the data
+  -proj_text,                # We noted earlier that this was unfortunately an empty string for ~50% of the data
+  -risks_text,               # We noted earlier that this was unfortunately an empty string for ~50% of the data
+  -X,                        # Just an extra index that won't impact prediction
+  -id,                       # Yet another index that won't impact prediction
+  -Unnamed..0,               # Yet another index that won't impact prediction
+  -disable_communication,    # There is no variance in this variable at all
+  -blurb,                    # Since this is just the project caption that can be seen when browsing, it can't be used as a predictor itself
+  -name,                     # this will be unique to nearly every project, so there are too many levels to use as a predictor
+  -location,                 # this is a mess of a json that needs to be cleaned before being used in the model
+  -static_usd_rate,          # helped generate some of our other variables, but not a good predictor in and of itself
+  -created_at,               # datetime object won't work with the models
+  -launched_at,              # datetime object won't work with the models
+  -deadline,                 # datetime object won't work with the models
+  -TOPCOUNTRY,               # correlated with country itself
+  -currency,                 # correlated with country
+  -name_len_clean,           # this will likely be correlated with name_len, which is just the number of characters in the name
+  -blurb_len_clean,          # this will likely be correlated with blurb_len, which is just the number of characters in the blurb
+  -min_reward_val,           # this held a string object before converting the value to USD
+  -min_reward_val_clean,     # this held a float object in the native before converting the value to USD to have a standard measure
+  -backers_count,            # a future kickstarter campaigner will not be able to control this variable, so it will not be considered.
+  -launch_to_state_change,   # This was in datetime format, making it difficult for the model to handle
+  -launch_to_state_change_days,  # this feature would likely overfit because people who change state early are likely to have succeeded. 
+  -pledged,                  # we leave off pledged and usd_pledged because these seem very close to success/failure
+  -usd_pledged,              # and these features also don't really help a future project creator become successful
+  -create_to_launch,         # this was a datetime object so it couldn't be used with the models properly
+  -launch_to_deadline,       # this was a datetime object so it couldn't be used with the models properly
+  -spotlight, 
+  -created_at_weekday,       # the time the project was created seemed to be a little unlikely to impact the outcome, especially since there is already information about launch and deadline dates and times
+  -created_at_day,           # "
+  -created_at_hr,            # "
+  -created_at_yr,            # "
+  -created_at_month ,        # the time the project was created seemed to be a little unlikely to impact the outcome, especially since there is already information about launch and deadline dates and times
+  -category,                 # category will be difficult to use because of the number of categories >> some might not appear in training set
+  -goal                      # goal will be correlated with our usd_goal variable we created to standardize currency
+  )
+```
+
+
+```{r}
+set.seed(1)
+samps <- createDataPartition(data3$state, list=F, p =0.8)
+train <- data3[samps,]
+test <- data3[-samps,]
+
+####################################
+#####  Rpart Tree-Based Model  #####
+####################################
+success_model <- rpart( state ~ ., data=train, method = "class")
+preds <- predict(success_model, newdata = test, type='class')
+tab <- table(preds, test$state) 
+tab # Confusion Matrix for standard rpart model
+(tab[1,1] + tab[2,2] ) / sum(tab) # calculate accuracy
+
+
+####################################
+###########  C5.0 Model  ###########
+####################################
+library(C50)
+model <- C5.0(x = train[,-1], y = train$state)
+# summary(model)
+preds2 <- predict(model, newdata=test,type="class")
+tab2 <- table(preds2, test$state)
+tab2 # confusion matrix for c5.0 model
+(tab2[1,1] + tab2[2,2]) / sum(tab2) ## accuracy of the C5.0 model
+
+####################################
+###########  KNN Model  ############
+####################################
+
+## Subset to only include numeric variables and then testing a knn model
+names(train)
+## Determined k = 39 to be the best value of k.
+pr <- knn(train[,-(c(1,2,3,6,7,18,19,26,28))], test[,-(c(1,2,3,6,7,18,19,26,28))], cl = train$state, k= 39)
+mean(pr == test$state) ## accuracy of the knn model
+
+
+####################################
+#### Logistic Regression Model  ####
+####################################
+log_model <- glm(state~.,data= train, family="binomial")
+preds3 <- predict(log_model, newdata = test, type = "response")
+tab3 <- table(preds3>0.5,test$state)
+(tab3[1,1] + tab3[2,2] ) / sum(tab3) # Logistic Model accuracy
+
+
+####################################
+######  Random Forest Model  #######
+####################################
+names(train)
+myrf <- randomForest(train[ , -1], 
+                     train[ , 1], 
+                     sampsize = round(0.8*dim(train)[1]), 
+                     ntree = 500, 
+                     mtry = round(sqrt(dim(train)[2])),
+                     importance = TRUE)
+preds4 <- predict(myrf, newdata = test, type = "class")
+tab4 <- table(preds4, test$state)
+tab4 ## Confusion Matrix Random Forest
+(tab4[1,1] + tab4[2,2] ) / sum(tab4) # Random Forest Model accuracy
+
+####################################
+########  Adaboost Model  ##########
+####################################
+
+adaboost <- boosting(state~., data = train, boos = FALSE, mfinal = 20)
+## Let's explore the adaboost object:
+summary(adaboost)
+importanceplot(adaboost)
+t2 <- adaboost$trees[[2]]
+library(tree)
+
+plot(t2)
+text(t2, pretty=2)
+## We can also study the error evolution as boosting moved through each of the 20 weak learners.
+errorevol(adaboost, train)
+preds5 <- predict(adaboost,test)
+
+preds5$confusion ## Confusion Matrix for Adaboost
+preds5$error ## Error for Adaboost Model
+
+```
+
+Summary of model building/feature engineering:
+* Tested all different kinds models: KNN, C5.0 and Rpart tree based methods, logistic regression, random forest, and adaboost. Proceeded with RandomForest based on its accuracy.
+* Tested different combinations of variables, including removing time relation, including some time relation, and ultimately found that time did contribute a slight amount to the model.
+* Removed variables that a person would not necessarily have control over when creating kickstarter. For example, they wouldn't be able to control if their project was featured and this also only occurs when a project is successful. This needed to be removed in order to remove significant bias from the model.  
+* Further, I realized that I left in both goal and USD_goal, which were obviously very highly correlated, especially since most of the projects use USD.
+
+```{r}
+cor(data2$usd_goal,data2$goal)
+```
+
+Next, I decided to remove many of the variables associated with the "launched" date and time as well as the "deadline" date and time. In the random forest importance plot, these variables did not appear to help the model much and I thought they were most likely adding noise to the models. Later, relevant features can be added back into the model.
+```{r}
+data4 <- data3  %>% select(-launched_at_weekday, -launched_at_month, -launched_at_day, -launched_at_hr, -launched_at_yr, -LaunchedTuesday, -deadline_weekday, -DeadlineWeekend, -deadline_day, -deadline_month, -deadline_weekday,-deadline_hr, -deadline_yr, -launch_to_deadline_days)
+
+set.seed(3)
+samps <- createDataPartition(data4$state, list=F, p =0.8)
+train <- data4[samps,]
+test <- data4[-samps,]
+names(train)
+myrf <- randomForest(x = train[ , -1],
+                     y = train[ , 1],
+                     sampsize = round(0.8*dim(train)[1]),
+                     ntree = 500,
+                     mtry = round(sqrt(dim(train)[2])),
+                     importance = TRUE)
+```
+
+
+
+```{r}
+# summary(myrf)
+predsrf <- predict(myrf, newdata=test, type='class')
+myrf
+tab_rf <- table(predsrf, test$state)
+(tab_rf[1,1] + tab[2,2]) / sum(tab_rf)
+varImpPlot(myrf)
+```
+
+To see how we might improve our model, we can take a look at the out-of-bag predictions. I noticed that when examining the differences between the classes of the response variable in the observations that a threshold for usd_goal of $25000 would likely be a good feature, so I added that to the model.
+```{r}
+predsrf <- predict(myrf)
+success_but_p_fail <- train[(predsrf != train$state) & predsrf == "failed",]
+failed_but_p_suc <- train[(predsrf != train$state) & predsrf == "successful",]
+
+summary(success_but_p_fail)
+summary(failed_but_p_suc)
+messed_up <- train[(predsrf != train$state),]
+
+messed_up_small <- messed_up %>% filter(usd_goal < 25000)
+ggplot(data=messed_up_small) + geom_point(aes(y=state,x=usd_goal))
+
+## let's create a new threshold at 20000 for the funding goal. It appears that a good majority of points for successful campaigns fell under this threshold, even though they were predicted as failed.
+data4$goalthresh <- as.factor(ifelse(data4$usd_goal, 1, 0))
+```
+
+In addition to testing out this new threshold, I am going to remove the features for very high goals (lofty_goal) and strangely high and flat (all rewards were $10,000) incentive structures (tenthousandsonly).
+```{r}
+
+data5 <- data4  %>% select(-lofty_goal, -tenthousandsonly )
+
+set.seed(3)
+names(data5)
+samps <- createDataPartition(data5$state, list=F, p =0.8)
+train <- data5[samps,]
+test <- data5[-samps,]
+names(train)
+myrf <- randomForest(x = train[ , -1],
+                     y = train[ , 1],
+                     sampsize = round(0.8*dim(train)[1]),
+                     ntree = 500,
+                     mtry = round(sqrt(dim(train)[2])),
+                     importance = TRUE)
+myrf
+```
+
+
+```{r}
+predsrf <- predict(myrf, newdata=test, type='class')
+myrf
+tab_rf <- table(predsrf, test$state)
+(tab_rf[1,1] + tab[2,2]) / sum(tab_rf)
+varImpPlot(myrf)
+```
+
+After testing this out for a little bit, it was clear that some of the older variable combinations produced better model. With the following code I ran a grid search to find the optimal combination of hyperparameters. This was found to be a cp of 0.1 and with ntree = 1000.
+```{r}
+# seed = 2
+# control <- trainControl(method="repeatedcv", number=5, repeats=0, search="grid")
+# tunegrid <- expand.grid(.mtry=c(sqrt(ncol(data3))))
+# metric = "Accuracy"
+# modellist <- list()
+# for (cp in c(.001, .01, 0.1)) {
+#   for (ntree in c(500,1000,1500)) {
+#   set.seed(seed)
+#   fit <- train(state~., data=data3, method="rf", metric=metric, tuneGrid=tunegrid, trControl=control, ntree=ntree, cp=cp)
+#   key <- paste(cp,ntree, sep = "_")
+#   modellist[[key]] <- fit
+#   }
+# }
+# # compare results
+# results <- resamples(modellist)
+# summary(results)
+# dotplot(results)
+```
+```{r}
+
+set.seed(1)
+samps <- createDataPartition(data3$state, list=F, p =0.8)
+train <- data3[samps,]
+test <- data3[-samps,]
+
+myrf <- randomForest(x = train[ , -1],
+                     y = train[ , 1],
+                     sampsize = round(0.8*dim(train)[1]),
+                     ntree = 1000,
+                     mtry = round(sqrt(dim(train)[2])),
+                     cp = 0.1,
+                     importance = TRUE)
+myrf
+preds_final <- predict(myrf, newdata = test, type="class")
+mean(preds_final  == test$state)
+varImpPlot(myrf, main = 'Final Random Forest Model (1000 Trees, cp=0.1')
+
+```
+## Conclusions
+From the results of our Random Forest model, we find that the most important factor in predicting success for these kickstarter campaigns is the goal. Having lofty goals appears to delegitimize your project, as many more fail that have high goals than succeed. Being staff picked was also a large contributing factor to success. Having the elevated platform of being chosen by someone at Kickstarter does seem to reap benefits. Lastly, the third principal variable in distinguishing successful campaigns is the number of rewards. It is also important to note that many of the sentiment variables created were not actually that useful in the model. I find it pretty surprising that the number of rewards is more important in the determination of success and failure than sentiment, but it goes to show you how important those rewards were to include in the model. People really seem to be driven by these types of incentives based on these results.
+
+
+## Next Steps
+This project can be improved in several ways in the future. The first suggestion for improvement would be to try to successfully completely capture the complete project descriptions for each observations. As I stated at the beginning, I was only able to collect around 50% of these data. With this additionally textual information, new features could be created to determine how sentiment of the actual project text plays a role in these projects. A few features that might be interesting to explore would be to count the number of people mentioned in the story, to analyze discrepancies in the sentiment between both the actual project description and the section of the description titled "risks and challenges". How do these relate to each other? Do people actually like hearing honest and potentally more negative language in the risks and challenges or do they prefer higher confidence in this section? A second improvement could also be to develop a way to analyze imagery, including that in the thumbnails, background, and, perhaps most importantly, videos. Many projects use beautiful imagery to help promote their product. Perhaps their would be a way to classify these as more or less aesthetically pleasing and see if this categorization trends with success or failure. Lastly, I would recommend applying emotional analysis as well. It is easy to forget that polarity is simply measuring positive and negative reaction to words. How does the actual emotional content of the text contribute to the success or failure of the project? Do different categories see different levels of success depending on their emotional balance? For example, do gaming projects tend to do better with a more joyous and exciting language compared to art projects? Questions like these would be interesting to explore in the future. 
